@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Уравнение-бит</title>
+<style>
+:root{box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+*{box-sizing:border-box}
+html,body{margin:0;background:#000;color:#fff;font-family:ui-monospace,Menlo,Consolas,monospace}
+body{min-height:100%;display:flex;flex-direction:column;align-items:center;padding:14px 12px 24px;gap:12px}
+h1{margin:6px 0 0;font-size:20px;text-align:center;line-height:1.3}
+h1 span{display:block;color:#ffd166;font-size:14px;margin-top:4px}
+#num{font-size:56px;font-weight:800;color:#4cd9f5;line-height:1}
+canvas{width:100%;max-width:760px;height:300px;display:block}
+#eq{width:100%;max-width:760px;display:flex;gap:8px;align-items:center;border:1px solid #2b2f3a;border-radius:12px;padding:8px 10px;background:#0d0f15}
+#eq label{color:#4cd9f5;font-size:18px}
+#eq input{flex:1;min-width:0;background:transparent;border:0;outline:none;color:#fff;font:17px ui-monospace,Menlo,monospace}
+#eq input.bad{color:#ff6b6b}
+.bar{width:100%;max-width:760px;display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+button,select{background:#161a26;color:#fff;border:1px solid #2b2f3a;border-radius:10px;padding:9px 13px;font:15px inherit;cursor:pointer}
+button.main{background:#4cd9f5;color:#001018;font-weight:700;border-color:#4cd9f5}
+button.act{background:#2a3b4a;border-color:#4cd9f5}
+label.s{font-size:13px;opacity:.85;display:flex;align-items:center;gap:6px}
+input[type=range]{width:100px}
+small{max-width:760px;opacity:.6;font-size:12px;line-height:1.5}
+#err{color:#ff6b6b;font-size:12px;min-height:14px;max-width:760px;width:100%}
+</style>
+</head>
+<body>
+<h1>Какой бит бьёт сильнее?<span>Впиши уравнение — график нарисуется и зазвучит</span></h1>
+<div id="num">#1</div>
+<canvas id="c"></canvas>
+<div id="eq"><label>y =</label><input id="f" type="text" spellcheck="false" autocapitalize="off" autocomplete="off"></div>
+<div id="err"></div>
+<div class="bar" id="presets"></div>
+<div class="bar">
+  <button class="main" id="play">▶ Играть</button>
+  <select id="mode"><option value="beat">Режим: бит (удары)</option><option value="tone">Режим: тон (высота = y)</option></select>
+</div>
+<div class="bar">
+  <label class="s">Скорость <input type="range" id="spd" min="0.3" max="4" step="0.1" value="1.2"></label>
+  <label class="s">Длина x <input type="range" id="len" min="2" max="12" step="0.5" value="4"></label>
+  <label class="s">Громкость <input type="range" id="vol" min="0" max="1" step="0.01" value="0.8"></label>
+</div>
+<small>Доступно: mod(a,b), e (число Эйлера), exp, sin, cos, abs, sqrt, pow, floor, PI, степень через ^. Пример: -3 + 3.2*e^(-10*mod(x,1)) + 3.2*e^(-10*mod(x,4/3)). Каждый резкий скачок вверх = удар; чем больше скачок (удары совпали), тем сильнее бас.</small>
+<script>
+const $=id=>document.getElementById(id);
+const cv=$('c'),ctx=cv.getContext('2d');
+const PRESETS=[
+ '-3 + 3.2*e^(-10*mod(x,1)) + 3.2*e^(-10*mod(x,4/3))',
+ '-3 + 3.2*e^(-12*mod(x,0.5)) + 3.2*e^(-10*mod(x,1.5))',
+ '-3 + 3.2*e^(-8*mod(x,1)) + 3.2*e^(-8*mod(x,1.25)) + 1.5*e^(-20*mod(x,0.25))',
+ '-3 + 3.2*e^(-10*mod(x,2)) + 3.2*e^(-10*mod(x,0.75))',
+ '-3 + 3.2*e^(-10*mod(x,1)) + 3.2*e^(-10*mod(x+0.5,1))*0.8',
+ 'sin(3*x)+0.5*sin(7*x)'
+];
+let f=null,xmax=4,speed=1.2,px=0,ymin=-3.2,ymax=0.4,playing=false,audio=null,master=null,tone=null,toneG=null,mode='beat',last=performance.now();
+
+function compile(src){
+  let s=src.trim().replace(/^y\s*=/i,'').replace(/\^/g,'**').replace(/π/g,'PI').replace(/,\s*(\d+)\s*\/\s*(\d+)/g,',$1/$2');
+  s=s.replace(/(\d)\s*e\s*\*\*/g,'$1*e**').replace(/(\d|\))\s*(?=[xa-df-zA-DF-Z(])/g,'$1*').replace(/\)\s*(?=\d)/g,')*');
+  const g=new Function('x','mod','e','with(Math){return ('+s+')}');
+  const mod=(a,b)=>((a%b)+b)%b;
+  const fn=x=>g(x,mod,Math.E);
+  const v=fn(0.37); if(typeof v!=='number'||isNaN(v)) throw new Error('не число');
+  return fn;
+}
+function rescale(){
+  let a=Infinity,b=-Infinity;
+  for(let i=0;i<=1200;i++){const y=f(i/1200*xmax);if(isFinite(y)){a=Math.min(a,y);b=Math.max(b,y)}}
+  if(!isFinite(a)){a=-1;b=1}
+  if(b-a<1e-6){a-=1;b+=1}
+  const p=(b-a)*0.12;ymin=a-p;ymax=b+p;
+}
+function setEq(src){
+  try{f=compile(src);$('f').classList.remove('bad');$('err').textContent='';rescale();px=0}
+  catch(e){$('f').classList.add('bad');$('err').textContent='Не могу разобрать уравнение'}
+}
+$('f').oninput=e=>setEq(e.target.value);
+$('f').value=PRESETS[0];
+PRESETS.forEach((p,i)=>{
+  const b=document.createElement('button');b.textContent=i<5?'#'+(i+1):'sin';
+  b.onclick=()=>{$('f').value=p;setEq(p);$('num').textContent=i<5?'#'+(i+1):'~';[...$('presets').children].forEach(c=>c.classList.remove('act'));b.classList.add('act')};
+  if(i===0)b.classList.add('act');$('presets').append(b);
+});
+$('spd').oninput=e=>speed=+e.target.value;
+$('len').oninput=e=>{xmax=+e.target.value;if(f){rescale();px=0}};
+$('vol').oninput=e=>{if(master)master.gain.value=+e.target.value};
+$('mode').onchange=e=>{mode=e.target.value;if(toneG)toneG.gain.value=0};
+$('play').onclick=()=>{
+  if(!audio){
+    audio=new (window.AudioContext||window.webkitAudioContext)();
+    master=audio.createGain();master.gain.value=+$('vol').value;
+    const comp=audio.createDynamicsCompressor();master.connect(comp);comp.connect(audio.destination);
+    tone=audio.createOscillator();tone.type='triangle';toneG=audio.createGain();toneG.gain.value=0;tone.connect(toneG);toneG.connect(master);tone.start();
+  }
+  audio.resume();playing=!playing;
+  $('play').textContent=playing?'⏸ Пауза':'▶ Играть';
+  if(!playing&&toneG)toneG.gain.setTargetAtTime(0,audio.currentTime,0.03);
+};
+function kick(strength){
+  if(!audio)return;const t=audio.currentTime,s=Math.max(0.15,Math.min(1,strength));
+  const o=audio.createOscillator(),g=audio.createGain();
+  o.type='sine';o.frequency.setValueAtTime(110+110*s,t);o.frequency.exponentialRampToValueAtTime(38,t+0.18);
+  g.gain.setValueAtTime(0.0001,t);g.gain.exponentialRampToValueAtTime(s*1.1,t+0.005);g.gain.exponentialRampToValueAtTime(0.0001,t+0.15+0.35*s);
+  o.connect(g);g.connect(master);o.start(t);o.stop(t+0.6);
+  // щелчок атаки
+  const c=audio.createOscillator(),cg=audio.createGain();
+  c.type='triangle';c.frequency.setValueAtTime(900,t);c.frequency.exponentialRampToValueAtTime(120,t+0.03);
+  cg.gain.setValueAtTime(0.25*s,t);cg.gain.exponentialRampToValueAtTime(0.0001,t+0.04);
+  c.connect(cg);cg.connect(master);c.start(t);c.stop(t+0.06);
+}
+function resize(){const r=devicePixelRatio||1;cv.width=cv.clientWidth*r;cv.height=cv.clientHeight*r;ctx.setTransform(r,0,0,r,0,0)}
+addEventListener('resize',resize);resize();
+
+function frame(now){
+  const dt=Math.min(0.05,(now-last)/1000);last=now;
+  const W=cv.clientWidth,H=cv.clientHeight,L=14,R=W-14,T=14,B=H-14;
+  const sx=x=>L+x/xmax*(R-L), sy=y=>T+(ymax-y)/(ymax-ymin)*(B-T);
+  if(f&&playing){
+    const prev=px;let next=prev+dt*speed,wrapped=false;
+    if(next>=xmax){next=xmax;wrapped=true}
+    // детекция ударов по резким скачкам вверх
+    const step=0.002,range=ymax-ymin;let py=f(prev);
+    for(let x=prev+step;x<=next;x+=step){
+      const y=f(x);
+      if(mode==='beat'&&isFinite(y)&&isFinite(py)&&y-py>0.12*range) kick((y-py)/range*1.1);
+      py=y;
+    }
+    if(mode==='beat'&&prev===0&&f(0)-f(-1e-6)>0.12*range) kick(0.9);
+    px=wrapped?0:next;
+    if(wrapped&&mode==='beat'){const a=f(0),b=f(1e-5);if(isFinite(a)&&a-f(xmax-1e-5)>0.12*range)kick((a-f(xmax-1e-5))/range)}
+    if(mode==='tone'&&toneG){
+      const y=f(px);const n=Math.max(0,Math.min(1,(y-ymin)/range));
+      tone.frequency.setTargetAtTime(110*Math.pow(2,n*3),audio.currentTime,0.02);toneG.gain.setTargetAtTime(0.3,audio.currentTime,0.03);
+    }
+  }
+  ctx.clearRect(0,0,W,H);
+  // оси
+  ctx.strokeStyle='#8a8f9c';ctx.lineWidth=1.5;ctx.beginPath();
+  ctx.moveTo(L,T-6);ctx.lineTo(L,B+6);
+  if(ymin<0&&ymax>0){ctx.moveTo(L,sy(0));ctx.lineTo(R,sy(0))}
+  ctx.stroke();
+  if(f){
+    ctx.strokeStyle='#4cd9f5';ctx.lineWidth=3;ctx.lineJoin='round';ctx.beginPath();
+    const n=Math.max(2,Math.floor(px/xmax*1200));let pen=false;
+    for(let i=0;i<=n;i++){
+      const x=Math.min(px,i/1200*xmax),y=f(x);
+      if(!isFinite(y)){pen=false;continue}
+      pen?ctx.lineTo(sx(x),sy(y)):ctx.moveTo(sx(x),sy(y));pen=true;
+    }
+    ctx.stroke();
+    const y=f(px);
+    if(isFinite(y)){
+      const X=sx(px),Y=sy(y);
+      ctx.fillStyle='rgba(180,180,190,.55)';ctx.beginPath();ctx.arc(X,Y,11,0,7);ctx.fill();
+      ctx.fillStyle='#fff';ctx.beginPath();ctx.arc(X,Y,7,0,7);ctx.fill();
+    }
+  }
+  requestAnimationFrame(frame);
+}
+setEq(PRESETS[0]);
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
